@@ -94,7 +94,7 @@ stock_trading_bot/
 ### 1️⃣ Clone the Repository
 
 ```
-git clone https://github.com/your-username/stock-trading-bot.git
+git clone https://github.com/Ravikiran234/stock-trading-bot.git
 cd stock-trading-bot
 ```
 
