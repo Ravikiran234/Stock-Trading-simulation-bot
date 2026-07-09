@@ -5,12 +5,14 @@ import io
 import yfinance as yf
 import numpy as np
 from rl_trading import fetch_data, SimpleRLTrader, moving_average_strategy
+import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
 from datetime import timedelta
 from sentiment_utils import get_news_sentiment, send_telegram_alert
+
 import os
 
 def get_secret(key):
@@ -211,35 +213,54 @@ if st.button("📊 Predict with LSTM"):
             st.write(f"Overall Sentiment: **{sentiment_label}**")
 
             seq_len = 60
+
+            # --------------------------------
+            # Train ONE model on data excluding the last 30 known days.
+            # This single model is reused both to reconstruct those 30 known
+            # days (for accuracy scoring) and to continue forward into the
+            # real future (for the forecast) — avoids training a second
+            # model, which was pushing past Render's free-tier memory limit.
+            # --------------------------------
+            test_size = 30
+            train_scaled = scaled_data[:-test_size]
+
             X_train, y_train = [], []
-            for i in range(seq_len, len(scaled_data)):
-                X_train.append(scaled_data[i - seq_len:i, 0])
-                y_train.append(scaled_data[i, 0])
+            for i in range(seq_len, len(train_scaled)):
+                X_train.append(train_scaled[i - seq_len:i, 0])
+                y_train.append(train_scaled[i, 0])
             X_train, y_train = np.array(X_train), np.array(y_train)
             X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
 
             model = Sequential()
-            model.add(LSTM(50, return_sequences=True, input_shape=(X_train.shape[1], 1)))
-            model.add(LSTM(50))
+            model.add(LSTM(32, return_sequences=True, input_shape=(X_train.shape[1], 1)))
+            model.add(LSTM(32))
             model.add(Dense(1))
             model.compile(optimizer="adam", loss="mean_squared_error")
 
             with st.spinner("Training LSTM model..."):
-                model.fit(X_train, y_train, epochs=10, batch_size=32, verbose=0)
+                model.fit(X_train, y_train, epochs=8, batch_size=32, verbose=0)
             st.success("✅ Model training complete!")
 
-            # Predict next 30 days
-            last_60_days = scaled_data[-60:]
-            future_predictions = []
-            input_seq = last_60_days.copy()
+            # Walk forward 60 steps total: first 30 reconstruct the known
+            # held-out days (compared against real prices for accuracy),
+            # the next 30 are the genuine future forecast.
+            walk_predictions = []
+            input_seq = train_scaled[-seq_len:].copy()
 
-            for _ in range(30):
+            for _ in range(test_size + 30):
                 X_test = np.reshape(input_seq, (1, input_seq.shape[0], 1))
                 pred = model.predict(X_test, verbose=0)
-                future_predictions.append(pred[0, 0])
+                walk_predictions.append(pred[0, 0])
                 input_seq = np.append(input_seq[1:], pred, axis=0)
 
-            future_prices = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1))
+            walk_predictions = np.array(walk_predictions).reshape(-1, 1)
+            backtest_preds_scaled = walk_predictions[:test_size]
+            future_preds_scaled = walk_predictions[test_size:]
+
+            actual_prices_bt = scaler.inverse_transform(scaled_data[-test_size:])
+            predicted_prices_bt = scaler.inverse_transform(backtest_preds_scaled)
+
+            future_prices = scaler.inverse_transform(future_preds_scaled)
             future_dates = pd.date_range(pred_data.index[-1] + timedelta(days=1), periods=30, freq='B')
             # --------------------------------
             # Adjust predictions using sentiment
@@ -266,40 +287,8 @@ if st.button("📊 Predict with LSTM"):
             # -------------------------------
             st.markdown("---")
             st.subheader("🎯 LSTM Model Accuracy (Backtest)")
-            st.caption("Held-out test: the last 30 known days were hidden from training, "
-                       "then predicted and compared against their real prices.")
-
-            test_size = 30
-            train_scaled = scaled_data[:-test_size]
-            test_scaled = scaled_data[-(test_size + seq_len):]
-
-            X_bt_train, y_bt_train = [], []
-            for i in range(seq_len, len(train_scaled)):
-                X_bt_train.append(train_scaled[i - seq_len:i, 0])
-                y_bt_train.append(train_scaled[i, 0])
-            X_bt_train, y_bt_train = np.array(X_bt_train), np.array(y_bt_train)
-            X_bt_train = np.reshape(X_bt_train, (X_bt_train.shape[0], X_bt_train.shape[1], 1))
-
-            backtest_model = Sequential()
-            backtest_model.add(LSTM(50, return_sequences=True, input_shape=(X_bt_train.shape[1], 1)))
-            backtest_model.add(LSTM(50))
-            backtest_model.add(Dense(1))
-            backtest_model.compile(optimizer="adam", loss="mean_squared_error")
-
-            with st.spinner("Backtesting model accuracy on held-out data..."):
-                backtest_model.fit(X_bt_train, y_bt_train, epochs=10, batch_size=32, verbose=0)
-
-            X_bt_test, y_bt_test = [], []
-            for i in range(seq_len, len(test_scaled)):
-                X_bt_test.append(test_scaled[i - seq_len:i, 0])
-                y_bt_test.append(test_scaled[i, 0])
-            X_bt_test, y_bt_test = np.array(X_bt_test), np.array(y_bt_test)
-            X_bt_test = np.reshape(X_bt_test, (X_bt_test.shape[0], X_bt_test.shape[1], 1))
-
-            bt_predictions = backtest_model.predict(X_bt_test, verbose=0)
-
-            actual_prices_bt = scaler.inverse_transform(y_bt_test.reshape(-1, 1))
-            predicted_prices_bt = scaler.inverse_transform(bt_predictions)
+            st.caption("The same trained model reconstructed the last 30 known days "
+                       "(walking forward from before that window), compared here against their real prices.")
 
             rmse = np.sqrt(mean_squared_error(actual_prices_bt, predicted_prices_bt))
             mae = mean_absolute_error(actual_prices_bt, predicted_prices_bt)
@@ -330,6 +319,9 @@ if st.button("📊 Predict with LSTM"):
             ax_bt.set_ylabel("Price")
             ax_bt.legend()
             st.pyplot(fig_bt)
+
+            # Free TensorFlow session memory before moving on
+            tf.keras.backend.clear_session()
 
             # -------------------------------
             # 💰 Investment Suggestion Based on LSTM Predictions
