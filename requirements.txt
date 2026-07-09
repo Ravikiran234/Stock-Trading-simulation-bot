@@ -4,6 +4,6 @@ pandas
 numpy
 matplotlib
 scikit-learn
-torch
-gym
-stable-baselines3
+tensorflow
+vaderSentiment
+requests

@@ -5,19 +5,16 @@ import io
 import yfinance as yf
 import numpy as np
 from rl_trading import fetch_data, SimpleRLTrader, moving_average_strategy
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
 from datetime import timedelta
 from sentiment_utils import get_news_sentiment, send_telegram_alert
 
-NEWS_API_KEY = "d4183b87b84f4966b265c54f3ef2b5e9"
-BOT_TOKEN = "8248866353:AAHRgVYnlsayjcTVRXOR_wJeUkf1hPnZ62w"
-CHAT_ID = "1417336803"
-
+NEWS_API_KEY = st.secrets["GUARDIAN_API_KEY"]
+BOT_TOKEN = st.secrets["BOT_TOKEN"]
+CHAT_ID = st.secrets["CHAT_ID"]
 
 # -------------------------------
 # Initialize Session State
@@ -36,6 +33,7 @@ st.set_page_config(page_title="Stock Trading Bot", layout="wide")
 st.title("📈 Stock Trading Bot Simulation ")
 st.subheader("🌍 Live Market Overview")
 
+
 # -------------------------------
 # Function to get Top Gainers
 # -------------------------------
@@ -45,7 +43,7 @@ def get_auto_top_gainers(region="india", top_n=5):
             tickers = [
                 "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "LT.NS", "ITC.NS",
                 "BHARTIARTL.NS", "KOTAKBANK.NS", "SBIN.NS", "SUNPHARMA.NS", "WIPRO.NS", "TITAN.NS",
-                "TATASTEEL.NS", "TATAMOTORS.NS", "BAJFINANCE.NS", "ONGC.NS", "POWERGRID.NS", "ULTRACEMCO.NS"
+                "TATASTEEL.NS", "BAJFINANCE.NS", "ONGC.NS", "POWERGRID.NS", "ULTRACEMCO.NS"
             ]
         else:
             tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM", "V", "PG", "UNH", "DIS"]
@@ -70,13 +68,14 @@ def get_auto_top_gainers(region="india", top_n=5):
         st.warning(f"⚠️ Could not fetch data: {e}")
         return pd.DataFrame()
 
+
 # -------------------------------
 # Show Top 5 Gainers (India & USA)
 # -------------------------------
 col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown("#### 🇮🇳 Top 5 Indian Gainers Today")
+    st.subheader(" Top 5 Indian Gainers Today")
     india_gainers = get_auto_top_gainers(region="india")
     if not india_gainers.empty:
         st.dataframe(india_gainers, hide_index=True)
@@ -256,6 +255,76 @@ if st.button("📊 Predict with LSTM"):
             st.pyplot(plt)
 
             # -------------------------------
+            # 🎯 LSTM Model Accuracy (Backtest on known historical data)
+            # -------------------------------
+            st.markdown("---")
+            st.subheader("🎯 LSTM Model Accuracy (Backtest)")
+            st.caption("Held-out test: the last 30 known days were hidden from training, "
+                       "then predicted and compared against their real prices.")
+
+            test_size = 30
+            train_scaled = scaled_data[:-test_size]
+            test_scaled = scaled_data[-(test_size + seq_len):]
+
+            X_bt_train, y_bt_train = [], []
+            for i in range(seq_len, len(train_scaled)):
+                X_bt_train.append(train_scaled[i - seq_len:i, 0])
+                y_bt_train.append(train_scaled[i, 0])
+            X_bt_train, y_bt_train = np.array(X_bt_train), np.array(y_bt_train)
+            X_bt_train = np.reshape(X_bt_train, (X_bt_train.shape[0], X_bt_train.shape[1], 1))
+
+            backtest_model = Sequential()
+            backtest_model.add(LSTM(50, return_sequences=True, input_shape=(X_bt_train.shape[1], 1)))
+            backtest_model.add(LSTM(50))
+            backtest_model.add(Dense(1))
+            backtest_model.compile(optimizer="adam", loss="mean_squared_error")
+
+            with st.spinner("Backtesting model accuracy on held-out data..."):
+                backtest_model.fit(X_bt_train, y_bt_train, epochs=10, batch_size=32, verbose=0)
+
+            X_bt_test, y_bt_test = [], []
+            for i in range(seq_len, len(test_scaled)):
+                X_bt_test.append(test_scaled[i - seq_len:i, 0])
+                y_bt_test.append(test_scaled[i, 0])
+            X_bt_test, y_bt_test = np.array(X_bt_test), np.array(y_bt_test)
+            X_bt_test = np.reshape(X_bt_test, (X_bt_test.shape[0], X_bt_test.shape[1], 1))
+
+            bt_predictions = backtest_model.predict(X_bt_test, verbose=0)
+
+            actual_prices_bt = scaler.inverse_transform(y_bt_test.reshape(-1, 1))
+            predicted_prices_bt = scaler.inverse_transform(bt_predictions)
+
+            rmse = np.sqrt(mean_squared_error(actual_prices_bt, predicted_prices_bt))
+            mae = mean_absolute_error(actual_prices_bt, predicted_prices_bt)
+            mape = mean_absolute_percentage_error(actual_prices_bt, predicted_prices_bt) * 100
+            price_accuracy = 100 - mape
+
+            actual_direction = np.diff(actual_prices_bt.flatten()) > 0
+            predicted_direction = np.diff(predicted_prices_bt.flatten()) > 0
+            directional_accuracy = np.mean(actual_direction == predicted_direction) * 100
+
+            bcol1, bcol2, bcol3, bcol4 = st.columns(4)
+            bcol1.metric("RMSE", f"{rmse:.2f}")
+            bcol2.metric("MAE", f"{mae:.2f}")
+            bcol3.metric("Price Accuracy", f"{price_accuracy:.1f}%")
+            bcol4.metric("Directional Accuracy", f"{directional_accuracy:.1f}%")
+
+            st.caption(
+                "Price Accuracy = 100 − MAPE (how close predicted prices are to actual, on average). "
+                "Directional Accuracy = % of days the model correctly predicted up-vs-down movement, "
+                "not just the exact price."
+            )
+
+            fig_bt, ax_bt = plt.subplots(figsize=(10, 5))
+            ax_bt.plot(actual_prices_bt, label="Actual Price", color="blue")
+            ax_bt.plot(predicted_prices_bt, label="Predicted Price", color="orange")
+            ax_bt.set_title(f"{ticker} - Backtest: Predicted vs Actual (Last {test_size} Known Days)")
+            ax_bt.set_xlabel("Day")
+            ax_bt.set_ylabel("Price")
+            ax_bt.legend()
+            st.pyplot(fig_bt)
+
+            # -------------------------------
             # 💰 Investment Suggestion Based on LSTM Predictions
             # -------------------------------
 
@@ -288,7 +357,7 @@ if st.button("📊 Predict with LSTM"):
         🚨 STOCK PREDICTION ALERT
 
         Ticker: {ticker}
-        
+
         💰 Initial Investment Used In Simulation:
          {currency}{investment}
 
@@ -359,4 +428,3 @@ if st.button("📊 Predict with LSTM"):
             file_name=f"{ticker}_LSTM_predictions.csv",
             mime="text/csv"
         )
-

@@ -1,27 +1,29 @@
 import requests
-from newsapi import NewsApiClient
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # --------------------------------
-# Get News Sentiment
+# Get News Sentiment (Guardian API - free tier works in production)
 # --------------------------------
 def get_news_sentiment(api_key, ticker):
 
     analyzer = SentimentIntensityAnalyzer()
-    newsapi = NewsApiClient(api_key=api_key)
 
     try:
-        news = newsapi.get_everything(
-            q=ticker,
-            language="en",
-            sort_by="publishedAt",
-            page_size=20
-        )
+        url = "https://content.guardianapis.com/search"
+        params = {
+            "q": ticker,
+            "api-key": api_key,
+            "order-by": "newest",
+            "page-size": 20
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+        articles = response.json().get("response", {}).get("results", [])
 
         sentiments = []
 
-        for article in news["articles"]:
-            title = article["title"]
+        for article in articles:
+            title = article["webTitle"]
             score = analyzer.polarity_scores(title)["compound"]
             sentiments.append(score)
 
