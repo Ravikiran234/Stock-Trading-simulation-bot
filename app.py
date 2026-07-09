@@ -11,10 +11,17 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
 from datetime import timedelta
 from sentiment_utils import get_news_sentiment, send_telegram_alert
+import os
 
-NEWS_API_KEY = st.secrets["GUARDIAN_API_KEY"]
-BOT_TOKEN = st.secrets["BOT_TOKEN"]
-CHAT_ID = st.secrets["CHAT_ID"]
+def get_secret(key):
+    try:
+        return st.secrets[key]
+    except (FileNotFoundError, KeyError):
+        return os.environ[key]
+
+NEWS_API_KEY = get_secret("GUARDIAN_API_KEY")
+BOT_TOKEN = get_secret("BOT_TOKEN")
+CHAT_ID = get_secret("CHAT_ID")
 
 # -------------------------------
 # Initialize Session State
